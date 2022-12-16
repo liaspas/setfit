@@ -80,6 +80,7 @@ class SetFitTrainer:
         self,
         model: Optional["SetFitModel"] = None,
         train_dataset: Optional["Dataset"] = None,
+        dev_dataset: Optional["Dataset"] = None,
         eval_dataset: Optional["Dataset"] = None,
         model_init: Optional[Callable[[], "SetFitModel"]] = None,
         metric: Union[str, Callable[["Dataset", "Dataset"], Dict[str, float]]] = "accuracy",
@@ -102,6 +103,7 @@ class SetFitTrainer:
             )
 
         self.train_dataset = train_dataset
+        self.dev_dataset = dev_dataset
         self.eval_dataset = eval_dataset
         self.model_init = model_init
         self.metric = metric
@@ -310,6 +312,19 @@ class SetFitTrainer:
 
         x_train = train_dataset["text"]
         y_train = train_dataset["label"]
+
+        # do the same for the dev dataset, if it exists
+        x_val = None
+        y_val = None
+        if self.dev_dataset is not None:
+            self._validate_column_mapping(self.dev_dataset)
+            dev_dataset = self.dev_dataset
+            if self.column_mapping is not None:
+                logger.info("Applying column mapping to development dataset")
+                dev_dataset = self._apply_column_mapping(self.dev_dataset, self.column_mapping)
+            x_val = dev_dataset["text"]
+            y_val = dev_dataset["label"]
+
         if self.loss_class is None:
             logger.warning("No `loss_class` detected! Using `CosineSimilarityLoss` as the default.")
             self.loss_class = losses.CosineSimilarityLoss
@@ -389,6 +404,8 @@ class SetFitTrainer:
                 x_train,
                 y_train,
                 num_epochs=num_epochs,
+                x_val=x_val,
+                y_val=y_val,
                 batch_size=batch_size,
                 learning_rate=learning_rate,
                 body_learning_rate=body_learning_rate,

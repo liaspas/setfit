@@ -3,6 +3,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
+from sklearn.metrics import f1_score
+
+from setfit.losses import ASLSingleLabel, AsymmetricLossOptimized
+
 
 # Google Colab runs on Python 3.7, so we need this to be compatible
 try:
@@ -35,6 +39,8 @@ logging.set_verbosity_info()
 logger = logging.get_logger(__name__)
 
 MODEL_HEAD_NAME = "model_head.pkl"
+CHECKPOINT_PATH_BODY = "tmp_body.pt"
+CHECKPOINT_PATH_HEAD = "tmp_head.pt"
 
 
 class SetFitBaseModel:
@@ -73,7 +79,10 @@ class SetFitHead(models.Dense):
         out_features: int = 1,
         temperature: float = 1.0,
         bias: bool = True,
+        dropout: float = 0.1,
         device: Optional[Union[torch.device, str]] = None,
+        use_asymmetric_loss=True,
+        multitarget=True,
     ) -> None:
         super(models.Dense, self).__init__()  # init on models.Dense's parent: nn.Module
 
@@ -82,10 +91,13 @@ class SetFitHead(models.Dense):
         else:
             self.linear = nn.LazyLinear(out_features, bias=bias)
 
+        self.dropout = nn.Dropout(dropout)
         self.in_features = in_features
         self.out_features = out_features
         self.temperature = temperature
         self.bias = bias
+        self.use_asymmetric_loss = use_asymmetric_loss
+        self.multitarget = multitarget
         self._device = device or "cuda" if torch.cuda.is_available() else "cpu"
 
         self.to(self._device)
@@ -116,11 +128,12 @@ class SetFitHead(models.Dense):
             is_features_dict = True
 
         x = features["sentence_embedding"] if is_features_dict else features
+        x = self.dropout(x)
         logits = self.linear(x)
-        if self.out_features == 1:  # only has one target
-            outputs = torch.sigmoid(logits)
+        temperature = temperature or self.temperature
+        if self.out_features == 1 or self.multitarget:  # only has one target
+            outputs = logits / temperature
         else:  # multiple targets
-            temperature = temperature or self.temperature
             outputs = nn.functional.softmax(logits / temperature, dim=-1)
 
         if is_features_dict:
@@ -141,7 +154,8 @@ class SetFitHead(models.Dense):
 
         probs = self.predict_proba(x_test)
 
-        if self.out_features == 1:
+        if self.out_features == 1 or self.multitarget:
+            probs = torch.sigmoid(probs)
             out = torch.where(probs >= 0.5, 1, 0)
         else:
             out = torch.argmax(probs, dim=-1)
@@ -153,8 +167,16 @@ class SetFitHead(models.Dense):
 
     def get_loss_fn(self):
         if self.out_features == 1:  # if single target
+            if self.use_asymmetric_loss:
+                return ASLSingleLabel()
             return torch.nn.BCELoss()
-        return torch.nn.CrossEntropyLoss()
+        else:
+            if self.use_asymmetric_loss:
+                return (
+                    AsymmetricLossOptimized() if self.multitarget  # if multilabel
+                    else ASLSingleLabel()  # if multiclass
+                )
+            return torch.nn.CrossEntropyLoss()
 
     @property
     def device(self) -> torch.device:
@@ -211,6 +233,8 @@ class SetFitModel(PyTorchModelHubMixin):
         x_train: List[str],
         y_train: List[int],
         num_epochs: int,
+        x_val: Optional[List[str]] = None,
+        y_val: Optional[List[int]] = None,
         batch_size: Optional[int] = None,
         learning_rate: Optional[float] = None,
         body_learning_rate: Optional[float] = None,
@@ -220,15 +244,23 @@ class SetFitModel(PyTorchModelHubMixin):
     ) -> None:
         if isinstance(self.model_head, nn.Module):  # train with pyTorch
             device = self.model_body.device
-            self.model_body.train()
-            self.model_head.train()
 
-            dataloader = self._prepare_dataloader(x_train, y_train, batch_size, max_length)
+            val_dataloader = None
+            best_val_f1 = 0.0
+            val_f1 = 0.0
+            if x_val is not None and y_val is not None:
+                val_dataloader = self._prepare_dataloader(x_val, y_val, batch_size, max_length)
+
+            train_dataloader = self._prepare_dataloader(x_train, y_train, batch_size, max_length)
             criterion = self.model_head.get_loss_fn()
             optimizer = self._prepare_optimizer(learning_rate, body_learning_rate, l2_weight)
             scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
             for epoch_idx in tqdm(range(num_epochs), desc="Epoch", disable=not show_progress_bar):
-                for batch in dataloader:
+                self.model_body.train()
+                self.model_head.train()
+                total_loss = 0.0
+
+                for batch in train_dataloader:
                     features, labels = batch
                     optimizer.zero_grad()
 
@@ -245,8 +277,32 @@ class SetFitModel(PyTorchModelHubMixin):
                     loss = criterion(predictions, labels)
                     loss.backward()
                     optimizer.step()
+                    total_loss += loss.item()
 
+                train_loss = total_loss / len(train_dataloader)
                 scheduler.step()
+
+                # validation step
+                if val_dataloader:
+                    val_loss, val_f1 = self._val_step(val_dataloader, criterion)
+                    logger.info(
+                        f"Epoch {epoch_idx}: train loss: {train_loss:.3f}"
+                        f" | val loss {val_loss:.3f}, val f1 {val_f1:.3f}"
+                    )
+
+                    if val_f1 > best_val_f1:
+                        logger.info("Saving model...")
+                        torch.save(self.model_body.state_dict(), CHECKPOINT_PATH_BODY)
+                        torch.save(self.model_head.state_dict(), CHECKPOINT_PATH_HEAD)
+                        best_val_f1 = val_f1
+
+            # load the best models and clean temp files
+            if val_dataloader:
+                self.model_body.load_state_dict(torch.load(CHECKPOINT_PATH_BODY))
+                self.model_head.load_state_dict(torch.load(CHECKPOINT_PATH_HEAD))
+                os.unlink(CHECKPOINT_PATH_BODY)
+                os.unlink(CHECKPOINT_PATH_HEAD)
+
         else:  # train with sklearn
             embeddings = self.model_body.encode(x_train, normalize_embeddings=self.normalize_embeddings)
             self.model_head.fit(embeddings, y_train)
@@ -303,6 +359,43 @@ class SetFitModel(PyTorchModelHubMixin):
         )
 
         return optimizer
+
+    def _val_step(self, dataloader, criterion):
+        device = self.model_body.device
+        total_loss = 0.0
+        # for the score
+        pred_y_all = []
+        y_all = []
+
+        self.model_body.eval()
+        self.model_head.eval()
+        for batch in dataloader:
+            features, labels = batch
+
+            # to model's device
+            features = {k: v.to(device) for k, v in features.items()}
+            labels = labels.to(device)
+
+            outputs = self.model_body(features)
+            outputs = self.model_head(features)
+            predictions = outputs["prediction"]
+
+            loss = criterion(predictions, labels)
+
+            if self.multi_target_strategy:
+                predictions = torch.sigmoid(predictions)
+                out = torch.where(predictions >= 0.5, 1, 0)
+            else:
+                out = torch.argmax(predictions, dim=-1)
+
+            y_all += labels.tolist()
+            pred_y_all += out.tolist()
+            total_loss += loss.item()
+
+        val_loss = total_loss / len(dataloader)
+        val_f1 = f1_score(y_all, pred_y_all, average="macro")
+
+        return val_loss, val_f1
 
     def freeze(self, component: Optional[Literal["body", "head"]] = None) -> None:
         if component is None or component == "body":
@@ -391,16 +484,25 @@ class SetFitModel(PyTorchModelHubMixin):
             model_head = joblib.load(model_head_file)
         else:
             if use_differentiable_head:
+                if multi_target_strategy is None:
+                    use_multitarget = False
+                else:
+                    if multi_target_strategy in ["one-vs-rest", "multi-output"]:
+                        use_multitarget = True
+                    else:
+                        raise ValueError(
+                            f"multi_target_strategy '{multi_target_strategy}' is not supported for differentiable head"
+                        )
                 body_embedding_dim = model_body.get_sentence_embedding_dimension()
                 if "head_params" in model_kwargs.keys():
                     model_kwargs["head_params"].update({"in_features": body_embedding_dim})
                     model_kwargs["head_params"].update(
                         {"device": target_device}
                     )  # follow the `model_body`, put `model_head` on the target device
-                    model_head = SetFitHead(**model_kwargs["head_params"])
+                    model_head = SetFitHead(**model_kwargs["head_params"], multitarget=use_multitarget)
                 else:
                     model_head = SetFitHead(
-                        in_features=body_embedding_dim, device=target_device
+                        in_features=body_embedding_dim, device=target_device, multitarget=use_multitarget
                     )  # follow the `model_body`, put `model_head` on the target device
             else:
                 if "head_params" in model_kwargs.keys():
