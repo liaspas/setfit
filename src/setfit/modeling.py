@@ -169,7 +169,7 @@ class SetFitHead(models.Dense):
         if self.out_features == 1:  # if single target
             if self.use_asymmetric_loss:
                 return ASLSingleLabel()
-            return torch.nn.BCELoss()
+            return torch.nn.BCEWithLogitsLoss()
         else:
             if self.use_asymmetric_loss:
                 return (
