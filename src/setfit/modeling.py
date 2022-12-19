@@ -235,6 +235,7 @@ class SetFitModel(PyTorchModelHubMixin):
         num_epochs: int,
         x_val: Optional[List[str]] = None,
         y_val: Optional[List[int]] = None,
+        val_metric: str = "macro",
         batch_size: Optional[int] = None,
         learning_rate: Optional[float] = None,
         body_learning_rate: Optional[float] = None,
@@ -284,7 +285,7 @@ class SetFitModel(PyTorchModelHubMixin):
 
                 # validation step
                 if val_dataloader:
-                    val_loss, val_f1 = self._val_step(val_dataloader, criterion)
+                    val_loss, val_f1 = self._val_step(val_dataloader, criterion, val_metric)
                     logger.info(
                         f"Epoch {epoch_idx}: train loss: {train_loss:.3f}"
                         f" | val loss {val_loss:.3f}, val f1 {val_f1:.3f}"
@@ -360,7 +361,7 @@ class SetFitModel(PyTorchModelHubMixin):
 
         return optimizer
 
-    def _val_step(self, dataloader, criterion):
+    def _val_step(self, dataloader: DataLoader, criterion, val_metric: str):
         device = self.model_body.device
         total_loss = 0.0
         # for the score
@@ -393,7 +394,7 @@ class SetFitModel(PyTorchModelHubMixin):
             total_loss += loss.item()
 
         val_loss = total_loss / len(dataloader)
-        val_f1 = f1_score(y_all, pred_y_all, average="macro")
+        val_f1 = f1_score(y_all, pred_y_all, average=val_metric)
 
         return val_loss, val_f1
 

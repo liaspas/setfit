@@ -84,6 +84,7 @@ class SetFitTrainer:
         eval_dataset: Optional["Dataset"] = None,
         model_init: Optional[Callable[[], "SetFitModel"]] = None,
         metric: Union[str, Callable[["Dataset", "Dataset"], Dict[str, float]]] = "accuracy",
+        val_metric: str = "macro",
         loss_class=losses.CosineSimilarityLoss,
         num_iterations: int = 20,
         num_epochs: int = 1,
@@ -107,6 +108,7 @@ class SetFitTrainer:
         self.eval_dataset = eval_dataset
         self.model_init = model_init
         self.metric = metric
+        self.val_metric = val_metric
         self.loss_class = loss_class
         self.num_iterations = num_iterations
         self.num_epochs = num_epochs
@@ -406,6 +408,7 @@ class SetFitTrainer:
                 num_epochs=num_epochs,
                 x_val=x_val,
                 y_val=y_val,
+                val_metric=self.val_metric,
                 batch_size=batch_size,
                 learning_rate=learning_rate,
                 body_learning_rate=body_learning_rate,
