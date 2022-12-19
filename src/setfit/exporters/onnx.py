@@ -60,6 +60,9 @@ class OnnxSetFitModel(torch.nn.Module):
         # If head is set then we have a fully torch based model and make the final predictions
         # with the head.
         out = self.model_head(embeddings)
+        if self.model_head.out_features > 1:  # in case of multilabel we need to apply sigmoid
+            out = torch.sigmoid(out)
+            out = torch.where(out >= 0.5, 1, 0)
         return out
 
 
