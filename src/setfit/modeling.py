@@ -81,7 +81,7 @@ class SetFitHead(models.Dense):
         bias: bool = True,
         dropout: float = 0.1,
         device: Optional[Union[torch.device, str]] = None,
-        use_asymmetric_loss=True,
+        loss_func: Optional[Union[str, nn.Module]] = None,
         multitarget=True,
     ) -> None:
         super(models.Dense, self).__init__()  # init on models.Dense's parent: nn.Module
@@ -96,7 +96,7 @@ class SetFitHead(models.Dense):
         self.out_features = out_features
         self.temperature = temperature
         self.bias = bias
-        self.use_asymmetric_loss = use_asymmetric_loss
+        self.loss_func = loss_func
         self.multitarget = multitarget
         self._device = device or "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -166,17 +166,27 @@ class SetFitHead(models.Dense):
         return out
 
     def get_loss_fn(self):
-        if self.out_features == 1:  # if single target
-            if self.use_asymmetric_loss:
+        if isinstance(self.loss_func, nn.Module):
+            return self.loss_func
+
+        elif self.loss_func is None:
+            if self.out_features == 1 or self.multitarget:
+                return torch.nn.BCEWithLogitsLoss()
+            else:
+                return torch.nn.CrossEntropyLoss()
+
+        elif self.loss_func == 'Asymm':
+            if self.multitarget:
+                return AsymmetricLossOptimized()
+            else:
                 return ASLSingleLabel()
-            return torch.nn.BCEWithLogitsLoss()
+        
         else:
-            if self.use_asymmetric_loss:
-                return (
-                    AsymmetricLossOptimized() if self.multitarget  # if multilabel
-                    else ASLSingleLabel()  # if multiclass
-                )
-            return torch.nn.CrossEntropyLoss()
+            raise NotImplementedError(
+                f"Loss {self.loss_func} is not implemented."
+                "Supported: BCEWithLogitsLoss and CrossEntropy (default)"
+                "'Asymm' for Asymmetric Loss, else pass the loss function as a torch module."
+            )
 
     @property
     def device(self) -> torch.device:
