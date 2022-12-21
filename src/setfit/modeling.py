@@ -82,7 +82,7 @@ class SetFitHead(models.Dense):
         dropout: float = 0.1,
         device: Optional[Union[torch.device, str]] = None,
         loss_func: Optional[Union[str, nn.Module]] = None,
-        multitarget=True,
+        multitarget: bool = True,
     ) -> None:
         super(models.Dense, self).__init__()  # init on models.Dense's parent: nn.Module
 
@@ -180,7 +180,7 @@ class SetFitHead(models.Dense):
                 return AsymmetricLossOptimized()
             else:
                 return ASLSingleLabel()
-        
+
         else:
             raise NotImplementedError(
                 f"Loss {self.loss_func} is not implemented."
@@ -259,6 +259,9 @@ class SetFitModel(PyTorchModelHubMixin):
             val_dataloader = None
             best_val_f1 = 0.0
             val_f1 = 0.0
+            patience = 5
+            counter = 0
+
             if x_val is not None and y_val is not None:
                 val_dataloader = self._prepare_dataloader(x_val, y_val, batch_size, max_length)
 
@@ -306,6 +309,13 @@ class SetFitModel(PyTorchModelHubMixin):
                         torch.save(self.model_body.state_dict(), CHECKPOINT_PATH_BODY)
                         torch.save(self.model_head.state_dict(), CHECKPOINT_PATH_HEAD)
                         best_val_f1 = val_f1
+                        counter = 0
+                    else:
+                        counter += 1
+
+                    # if score doesn't improve for {patience} epochs, stop the training
+                    if counter >= patience:
+                        break
 
             # load the best models and clean temp files
             if val_dataloader:
@@ -393,9 +403,9 @@ class SetFitModel(PyTorchModelHubMixin):
 
             loss = criterion(predictions, labels)
 
-            if self.multi_target_strategy:
-                predictions = torch.sigmoid(predictions)
-                out = torch.where(predictions >= 0.5, 1, 0)
+            # binary or multilabel
+            if self.multi_target_strategy or self.model_head.out_features == 1:
+                out = torch.sigmoid(predictions)
             else:
                 out = torch.argmax(predictions, dim=-1)
 
