@@ -406,6 +406,7 @@ class SetFitModel(PyTorchModelHubMixin):
             # binary or multilabel
             if self.multi_target_strategy or self.model_head.out_features == 1:
                 out = torch.sigmoid(predictions)
+                out = torch.where(out >= 0.5, 1, 0)
             else:
                 out = torch.argmax(predictions, dim=-1)
 
