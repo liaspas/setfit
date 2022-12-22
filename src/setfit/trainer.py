@@ -12,7 +12,12 @@ from transformers.trainer_utils import HPSearchBackend, default_compute_objectiv
 
 from . import logging
 from .integrations import default_hp_search_backend, is_optuna_available, run_hp_search_optuna
-from .modeling import SupConLoss, sentence_pairs_generation, sentence_pairs_generation_multilabel
+from .modeling import (
+    SupConLoss,
+    remove_duplicated_pairs,
+    sentence_pairs_generation,
+    sentence_pairs_generation_multilabel,
+)
 from .utils import BestRun, default_hp_space_optuna
 
 
@@ -378,6 +383,10 @@ class SetFitTrainer:
                         train_examples = sentence_pairs_generation(
                             np.array(x_train), np.array(y_train), train_examples
                         )
+                # remove duplicate pairs
+                len_old = len(train_examples)
+                train_examples = remove_duplicated_pairs(train_examples)
+                logger.info(f"Removed {len(train_examples) - len_old} duplicate pairs.")
 
                 train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=batch_size)
                 train_loss = self.loss_class(self.model.model_body)

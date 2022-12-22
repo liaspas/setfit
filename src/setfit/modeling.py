@@ -724,6 +724,28 @@ def sentence_pairs_generation_cos_sim(sentences, pairs, cos_sim_matrix):
     return pairs
 
 
+def remove_duplicated_pairs(pairs: List[InputExample]) -> List[InputExample]:
+    seen_pair = set()
+    drop_idx = []
+    for pair_idx, pair in enumerate(pairs):
+        sen1 = pair.texts[0]
+        sen2 = pair.texts[1]
+        check1 = sen1 + sen2
+        check2 = sen2 + sen1
+
+        if check1 in seen_pair or check2 in seen_pair:
+            drop_idx.append(pair_idx)
+        if check1 not in seen_pair:
+            seen_pair.add(check1)
+        if check2 not in seen_pair:
+            seen_pair.add(check2)
+
+    for idx in sorted(drop_idx, reverse=True):
+        del pairs[idx]
+
+    return pairs
+
+
 class SKLearnWrapper:
     def __init__(self, st_model=None, clf=None):
         self.st_model = st_model
