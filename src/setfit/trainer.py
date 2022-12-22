@@ -386,7 +386,7 @@ class SetFitTrainer:
                 # remove duplicate pairs
                 len_old = len(train_examples)
                 train_examples = remove_duplicated_pairs(train_examples)
-                logger.info(f"Removed {len(train_examples) - len_old} duplicate pairs.")
+                logger.info(f"Removed {len_old - len(train_examples)} duplicate pairs.")
 
                 train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=batch_size)
                 train_loss = self.loss_class(self.model.model_body)
