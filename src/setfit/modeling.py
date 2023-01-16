@@ -38,7 +38,8 @@ if TYPE_CHECKING:
 logging.set_verbosity_info()
 logger = logging.get_logger(__name__)
 
-MODEL_HEAD_NAME = "model_head.pkl"
+MODEL_HEAD_NAME_SK = "model_head.pkl"
+MODEL_HEAD_NAME_TORCH = "model_head.pt"
 CHECKPOINT_PATH_BODY = "tmp_body.pt"
 CHECKPOINT_PATH_HEAD = "tmp_head.pt"
 
@@ -466,7 +467,10 @@ class SetFitModel(PyTorchModelHubMixin):
 
     def _save_pretrained(self, save_directory: str) -> None:
         self.model_body.save(path=save_directory)
-        joblib.dump(self.model_head, f"{save_directory}/{MODEL_HEAD_NAME}")
+        if isinstance(self.model_head, nn.Module):
+            torch.save(self.model_head, f"{save_directory}/{MODEL_HEAD_NAME_TORCH}")
+        else:
+            joblib.dump(self.model_head, f"{save_directory}/{MODEL_HEAD_NAME_SK}")
 
     @classmethod
     def _from_pretrained(
@@ -489,11 +493,14 @@ class SetFitModel(PyTorchModelHubMixin):
         model_body.to(target_device)  # put `model_body` on the target device
 
         if os.path.isdir(model_id):
-            if MODEL_HEAD_NAME in os.listdir(model_id):
-                model_head_file = os.path.join(model_id, MODEL_HEAD_NAME)
+            print(model_id)
+            if MODEL_HEAD_NAME_SK in os.listdir(model_id):
+                model_head_file = os.path.join(model_id, MODEL_HEAD_NAME_SK)
+            elif MODEL_HEAD_NAME_TORCH in os.listdir(model_id):
+                model_head_file = os.path.join(model_id, MODEL_HEAD_NAME_TORCH)
             else:
                 logger.info(
-                    f"{MODEL_HEAD_NAME} not found in {Path(model_id).resolve()},"
+                    f"{MODEL_HEAD_NAME_SK} or {MODEL_HEAD_NAME_TORCH} not found in {Path(model_id).resolve()},"
                     " initialising classification head with random weights."
                     " You should TRAIN this model on a downstream task to use it for predictions and inference."
                 )
@@ -502,7 +509,7 @@ class SetFitModel(PyTorchModelHubMixin):
             try:
                 model_head_file = hf_hub_download(
                     repo_id=model_id,
-                    filename=MODEL_HEAD_NAME,
+                    filename=MODEL_HEAD_NAME_SK,
                     revision=revision,
                     cache_dir=cache_dir,
                     force_download=force_download,
@@ -512,14 +519,31 @@ class SetFitModel(PyTorchModelHubMixin):
                     local_files_only=local_files_only,
                 )
             except requests.exceptions.RequestException:
-                logger.info(
-                    f"{MODEL_HEAD_NAME} not found on HuggingFace Hub, initialising classification head with random weights."
-                    " You should TRAIN this model on a downstream task to use it for predictions and inference."
-                )
-                model_head_file = None
+                try:
+                    model_head_file = hf_hub_download(
+                        repo_id=model_id,
+                        filename=MODEL_HEAD_NAME_TORCH,
+                        revision=revision,
+                        cache_dir=cache_dir,
+                        force_download=force_download,
+                        proxies=proxies,
+                        resume_download=resume_download,
+                        use_auth_token=use_auth_token,
+                        local_files_only=local_files_only,
+                    )
+                except requests.exceptions.RequestException:
+                    logger.info(
+                        f"{MODEL_HEAD_NAME_SK} or {MODEL_HEAD_NAME_TORCH} not found on HuggingFace Hub, "
+                        "initialising classification head with random weights."
+                        " You should TRAIN this model on a downstream task to use it for predictions and inference."
+                    )
+                    model_head_file = None
 
         if model_head_file is not None:
-            model_head = joblib.load(model_head_file)
+            if os.path.basename(model_head_file) == MODEL_HEAD_NAME_SK:
+                model_head = joblib.load(model_head_file)
+            else:
+                model_head = torch.load(model_head_file, map_location=target_device)
         else:
             if use_differentiable_head:
                 if multi_target_strategy is None:
