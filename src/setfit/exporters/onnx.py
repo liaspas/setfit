@@ -62,8 +62,8 @@ class OnnxSetFitModel(torch.nn.Module):
         out_probs = self.model_head(embeddings)
         # one target or multilabel
         if self.model_head.out_features == 1 or self.model_head.multitarget:
-            out = torch.sigmoid(out_probs)
-            out = torch.where(out >= 0.5, 1, 0)
+            out_probs = torch.sigmoid(out_probs)
+            out = torch.where(out_probs >= 0.5, 1, 0)
         else:  # multi-class
             out = torch.argmax(out_probs, dim=-1)
         return out, out_probs
