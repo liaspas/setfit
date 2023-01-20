@@ -59,11 +59,14 @@ class OnnxSetFitModel(torch.nn.Module):
 
         # If head is set then we have a fully torch based model and make the final predictions
         # with the head.
-        out = self.model_head(embeddings)
-        if self.model_head.out_features > 1:  # in case of multilabel we need to apply sigmoid
-            out = torch.sigmoid(out)
+        out_probs = self.model_head(embeddings)
+        # one target or multilabel
+        if self.model_head.out_features == 1 or self.model_head.multitarget:
+            out = torch.sigmoid(out_probs)
             out = torch.where(out >= 0.5, 1, 0)
-        return out
+        else:  # multi-class
+            out = torch.argmax(out_probs, dim=-1)
+        return out, out_probs
 
 
 def export_onnx_setfit_model(setfit_model: OnnxSetFitModel, inputs, output_path, opset: int = 12):
