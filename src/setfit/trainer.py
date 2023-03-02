@@ -3,11 +3,12 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Union
 
 import evaluate
 import numpy as np
-import torch
+from datasets import DatasetDict
 from sentence_transformers import InputExample, losses
 from sentence_transformers.datasets import SentenceLabelDataset
 from sentence_transformers.losses.BatchHardTripletLoss import BatchHardTripletLossDistanceFunction
 from torch.utils.data import DataLoader
+from tqdm.auto import trange
 from transformers.trainer_utils import HPSearchBackend, default_compute_objective, number_of_arguments, set_seed
 
 from . import logging
@@ -147,9 +148,23 @@ class SetFitTrainer:
         required_columns = {"text", "label"}
         column_names = set(dataset.column_names)
         if self.column_mapping is None and not required_columns.issubset(column_names):
-            raise ValueError(
-                f"A column mapping must be provided when the dataset does not contain the following columns: {required_columns}"
-            )
+            # Issue #226: load_dataset will automatically assign points to "train" if no split is specified
+            if column_names == {"train"} and isinstance(dataset, DatasetDict):
+                raise ValueError(
+                    "SetFit expected a Dataset, but it got a DatasetDict with the split ['train']. "
+                    "Did you mean to select the training split with dataset['train']?"
+                )
+            elif isinstance(dataset, DatasetDict):
+                raise ValueError(
+                    f"SetFit expected a Dataset, but it got a DatasetDict with the splits {sorted(column_names)}. "
+                    "Did you mean to select one of these splits from the dataset?"
+                )
+            else:
+                raise ValueError(
+                    f"SetFit expected the dataset to have the columns {sorted(required_columns)}, "
+                    f"but only the columns {sorted(column_names)} were found. "
+                    "Either make sure these columns are present, or specify which columns to use with column_mapping in SetFitTrainer."
+                )
         if self.column_mapping is not None:
             missing_columns = required_columns.difference(self.column_mapping.values())
             if missing_columns:
@@ -158,7 +173,8 @@ class SetFitTrainer:
                 )
             if not set(self.column_mapping.keys()).issubset(column_names):
                 raise ValueError(
-                    f"The following columns are missing from the dataset: {set(self.column_mapping.keys()).difference(column_names)}. Please provide a mapping for all required columns."
+                    f"The column mapping expected the columns {sorted(self.column_mapping.keys())} in the dataset, "
+                    f"but the dataset had the columns {sorted(column_names)}."
                 )
 
     def _apply_column_mapping(self, dataset: "Dataset", column_mapping: Dict[str, str]) -> "Dataset":
@@ -241,7 +257,7 @@ class SetFitTrainer:
         Freeze SetFitModel's differentiable head.
         Note: call this function only when using the differentiable head.
         """
-        if not isinstance(self.model.model_head, torch.nn.Module):
+        if not self.model.has_differentiable_head:
             raise ValueError("Please use the differentiable head in `SetFitModel` when calling this function.")
 
         self._freeze = True  # Currently use self._freeze as a switch
@@ -256,7 +272,7 @@ class SetFitTrainer:
             keep_body_frozen (`bool`, *optional*, defaults to `False`):
                 Whether to freeze the body when unfreeze the head.
         """
-        if not isinstance(self.model.model_head, torch.nn.Module):
+        if not self.model.has_differentiable_head:
             raise ValueError("Please use the differentiable head in `SetFitModel` when calling this function.")
 
         self._freeze = False  # Currently use self._freeze as a switch
@@ -304,8 +320,9 @@ class SetFitTrainer:
             show_progress_bar (`bool`, *optional*, defaults to `True`):
                 Whether to show a bar that indicates training progress.
         """
+        set_seed(self.seed)  # Seed must be set before instantiating the model when using model_init.
+
         if trial:  # Trial and model initialization
-            set_seed(self.seed)  # Seed must be set before instantiating the model when using model_init.
             self._hp_search_setup(trial)  # sets trainer parameters and initializes model
 
         if self.train_dataset is None:
@@ -339,9 +356,8 @@ class SetFitTrainer:
         num_epochs = num_epochs or self.num_epochs
         batch_size = batch_size or self.batch_size
         learning_rate = learning_rate or self.learning_rate
-        is_differentiable_head = isinstance(self.model.model_head, torch.nn.Module)  # If False, assume using sklearn
 
-        if not is_differentiable_head or self._freeze:
+        if not self.model.has_differentiable_head or self._freeze:
             # sentence-transformers adaptation
             if self.loss_class in [
                 losses.BatchAllTripletLoss,
@@ -369,12 +385,10 @@ class SetFitTrainer:
                         distance_metric=self.distance_metric,
                         margin=self.margin,
                     )
-
-                train_steps = len(train_dataloader) * self.num_epochs
             else:
                 train_examples = []
 
-                for _ in range(self.num_iterations):
+                for _ in trange(self.num_iterations, desc="Generating Training Pairs", disable=not show_progress_bar):
                     if self.model.multi_target_strategy is not None:
                         train_examples = sentence_pairs_generation_multilabel(
                             np.array(x_train), np.array(y_train), train_examples
@@ -390,26 +404,25 @@ class SetFitTrainer:
 
                 train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=batch_size)
                 train_loss = self.loss_class(self.model.model_body)
-                train_steps = len(train_dataloader) * num_epochs
 
+            total_train_steps = len(train_dataloader) * num_epochs
             logger.info("***** Running training *****")
             logger.info(f"  Num examples = {len(train_examples)}")
             logger.info(f"  Num epochs = {num_epochs}")
-            logger.info(f"  Total optimization steps = {train_steps}")
+            logger.info(f"  Total optimization steps = {total_train_steps}")
             logger.info(f"  Total train batch size = {batch_size}")
 
-            warmup_steps = math.ceil(train_steps * self.warmup_proportion)
+            warmup_steps = math.ceil(total_train_steps * self.warmup_proportion)
             self.model.model_body.fit(
                 train_objectives=[(train_dataloader, train_loss)],
                 epochs=num_epochs,
-                steps_per_epoch=train_steps,
                 optimizer_params={"lr": learning_rate},
                 warmup_steps=warmup_steps,
                 show_progress_bar=show_progress_bar,
                 use_amp=self.use_amp,
             )
 
-        if not is_differentiable_head or not self._freeze:
+        if not self.model.has_differentiable_head or not self._freeze:
             # Train the final classifier
             self.model.fit(
                 x_train,
@@ -549,7 +562,6 @@ class SetFitTrainer:
         config: Optional[dict] = None,
         skip_lfs_files: bool = False,
     ):
-
         return self.model.push_to_hub(
             repo_path_or_name,
             repo_url,

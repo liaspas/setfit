@@ -1,8 +1,11 @@
+import pathlib
+import re
+import tempfile
 from unittest import TestCase
 
 import evaluate
 import pytest
-from datasets import Dataset
+from datasets import Dataset, load_dataset
 from sentence_transformers import losses
 from transformers.testing_utils import require_optuna
 from transformers.utils.hp_naming import TrialShortNamer
@@ -74,23 +77,65 @@ class SetFitTrainerTest(TestCase):
             trainer.train()
 
     def test_trainer_raises_error_with_missing_text(self):
+        """If the required columns are missing from the dataset, the library should throw an error and list the columns found."""
         dataset = Dataset.from_dict({"label": [0, 1, 2], "extra_column": ["d", "e", "f"]})
         trainer = SetFitTrainer(
             model=self.model, train_dataset=dataset, eval_dataset=dataset, num_iterations=self.num_iterations
         )
-        with pytest.raises(ValueError):
-            trainer.train()
+        expected_message = re.escape(
+            "SetFit expected the dataset to have the columns ['label', 'text'], "
+            "but only the columns ['extra_column', 'label'] were found. "
+            "Either make sure these columns are present, or specify which columns to use with column_mapping in SetFitTrainer."
+        )
+        with pytest.raises(ValueError, match=expected_message):
+            trainer._validate_column_mapping(trainer.train_dataset)
 
-    def test_column_mapping_with_missing_text(self):
+    def test_column_mapping_raises_error_when_mapped_columns_missing(self):
+        """If the columns specified in the column mapping are missing from the dataset, the library should throw an error and list the columns found."""
         dataset = Dataset.from_dict({"text": ["a", "b", "c"], "extra_column": ["d", "e", "f"]})
         trainer = SetFitTrainer(
             model=self.model,
             train_dataset=dataset,
             eval_dataset=dataset,
             num_iterations=self.num_iterations,
-            column_mapping={"label_new": "label"},
+            column_mapping={"text_new": "text", "label_new": "label"},
         )
-        with pytest.raises(ValueError):
+        expected_message = re.escape(
+            "The column mapping expected the columns ['label_new', 'text_new'] in the dataset, "
+            "but the dataset had the columns ['extra_column', 'text'].",
+        )
+        with pytest.raises(ValueError, match=expected_message):
+            trainer._validate_column_mapping(trainer.train_dataset)
+
+    def test_trainer_raises_error_when_dataset_not_split(self):
+        """Verify that an error is raised if we pass an unsplit dataset to the trainer."""
+        dataset = Dataset.from_dict({"text": ["a", "b", "c", "d"], "label": [0, 0, 1, 1]}).train_test_split(
+            test_size=0.5
+        )
+        trainer = SetFitTrainer(
+            model=self.model, train_dataset=dataset, eval_dataset=dataset, num_iterations=self.num_iterations
+        )
+        expected_message = re.escape(
+            "SetFit expected a Dataset, but it got a DatasetDict with the splits ['test', 'train']. "
+            "Did you mean to select one of these splits from the dataset?",
+        )
+        with pytest.raises(ValueError, match=expected_message):
+            trainer._validate_column_mapping(trainer.train_dataset)
+
+    def test_trainer_raises_error_when_dataset_is_dataset_dict_with_train(self):
+        """Verify that a useful error is raised if we pass an unsplit dataset with only a `train` split to the trainer."""
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            path = pathlib.Path(tmpdirname) / "test_dataset_dict_with_train.csv"
+            path.write_text("label,text\n1,good\n0,terrible\n")
+            dataset = load_dataset("csv", data_files=str(path))
+        trainer = SetFitTrainer(
+            model=self.model, train_dataset=dataset, eval_dataset=dataset, num_iterations=self.num_iterations
+        )
+        expected_message = re.escape(
+            "SetFit expected a Dataset, but it got a DatasetDict with the split ['train']. "
+            "Did you mean to select the training split with dataset['train']?",
+        )
+        with pytest.raises(ValueError, match=expected_message):
             trainer._validate_column_mapping(trainer.train_dataset)
 
     def test_column_mapping_multilabel(self):
@@ -274,6 +319,53 @@ class SetFitTrainerMultilabelTest(TestCase):
         )
 
         trainer.train()
+        metrics = trainer.evaluate()
+
+        self.assertEqual(
+            {
+                "f1": 1.0,
+                "accuracy": 1.0,
+            },
+            metrics,
+        )
+
+
+class SetFitTrainerMultilabelDifferentiableTest(TestCase):
+    def setUp(self):
+        self.model = SetFitModel.from_pretrained(
+            "sentence-transformers/paraphrase-albert-small-v2",
+            multi_target_strategy="one-vs-rest",
+            use_differentiable_head=True,
+            head_params={"out_features": 2},
+        )
+        self.num_iterations = 1
+
+    def test_trainer_multilabel_support_callable_as_metric(self):
+        dataset = Dataset.from_dict({"text_new": ["", "a", "b", "ab"], "label_new": [[0, 0], [1, 0], [0, 1], [1, 1]]})
+
+        multilabel_f1_metric = evaluate.load("f1", "multilabel")
+        multilabel_accuracy_metric = evaluate.load("accuracy", "multilabel")
+
+        def compute_metrics(y_pred, y_test):
+            return {
+                "f1": multilabel_f1_metric.compute(predictions=y_pred, references=y_test, average="micro")["f1"],
+                "accuracy": multilabel_accuracy_metric.compute(predictions=y_pred, references=y_test)["accuracy"],
+            }
+
+        trainer = SetFitTrainer(
+            model=self.model,
+            train_dataset=dataset,
+            eval_dataset=dataset,
+            metric=compute_metrics,
+            num_iterations=self.num_iterations,
+            column_mapping={"text_new": "text", "label_new": "label"},
+        )
+
+        trainer.freeze()
+        trainer.train()
+
+        trainer.unfreeze(keep_body_frozen=False)
+        trainer.train(5)
         metrics = trainer.evaluate()
 
         self.assertEqual(

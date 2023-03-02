@@ -1,7 +1,7 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 from sklearn.metrics import f1_score
 
@@ -43,6 +43,58 @@ MODEL_HEAD_NAME_TORCH = "model_head.pt"
 CHECKPOINT_PATH_BODY = "tmp_body.pt"
 CHECKPOINT_PATH_HEAD = "tmp_head.pt"
 
+MODEL_CARD_TEMPLATE = """---
+license: apache-2.0
+tags:
+- setfit
+- sentence-transformers
+- text-classification
+pipeline_tag: text-classification
+---
+
+# {model_name}
+
+This is a [SetFit model](https://github.com/huggingface/setfit) that can be used for text classification. \
+The model has been trained using an efficient few-shot learning technique that involves:
+
+1. Fine-tuning a [Sentence Transformer](https://www.sbert.net) with contrastive learning.
+2. Training a classification head with features from the fine-tuned Sentence Transformer.
+
+## Usage
+
+To use this model for inference, first install the SetFit library:
+
+```bash
+python -m pip install setfit
+```
+
+You can then run inference as follows:
+
+```python
+from setfit import SetFitModel
+
+# Download from Hub and run inference
+model = SetFitModel.from_pretrained("{model_name}")
+# Run inference
+preds = model(["i loved the spiderman movie!", "pineapple on pizza is the worst 🤮"])
+```
+
+## BibTeX entry and citation info
+
+```bibtex
+@article{{https://doi.org/10.48550/arxiv.2209.11055,
+doi = {{10.48550/ARXIV.2209.11055}},
+url = {{https://arxiv.org/abs/2209.11055}},
+author = {{Tunstall, Lewis and Reimers, Nils and Jo, Unso Eun Seo and Bates, Luke and Korat, Daniel and Wasserblat, Moshe and Pereg, Oren}},
+keywords = {{Computation and Language (cs.CL), FOS: Computer and information sciences, FOS: Computer and information sciences}},
+title = {{Efficient Few-Shot Learning Without Prompts}},
+publisher = {{arXiv}},
+year = {{2022}},
+copyright = {{Creative Commons Attribution 4.0 International}}
+}}
+```
+"""
+
 
 class SetFitBaseModel:
     def __init__(self, model, max_seq_length: int, add_normalization_layer: bool) -> None:
@@ -55,8 +107,8 @@ class SetFitBaseModel:
 
 class SetFitHead(models.Dense):
     """
-    A SetFit head that supports binary and multi-class classification
-    for end-to-end training.
+    A SetFit head that supports multi-class classification for end-to-end training.
+    Binary classification is treated as 2-class classification.
 
     To be compatible with Sentence Transformers, we inherit `Dense` from:
     https://github.com/UKPLab/sentence-transformers/blob/master/sentence_transformers/models/Dense.py
@@ -64,28 +116,41 @@ class SetFitHead(models.Dense):
     Args:
         in_features (`int`, *optional*):
             The embedding dimension from the output of the SetFit body. If `None`, defaults to `LazyLinear`.
-        out_features (`int`, defaults to `1`):
-            The number of targets.
-        temperature (`float`):
-            A logits' scaling factor when using multi-targets (i.e., number of targets more than 1).
+        out_features (`int`, defaults to `2`):
+            The number of targets. If set `out_features` to 1 for binary classification, it will be changed to 2 as 2-class classification.
+        temperature (`float`, defaults to `1.0`):
+            A logits' scaling factor. Higher values makes the model less confident and higher values makes
+            it more confident.
+        eps (`float`, defaults to `1e-5`):
+            A value for numerical stability when scaling logits.
         bias (`bool`, *optional*, defaults to `True`):
             Whether to add bias to the head.
         device (`torch.device`, str, *optional*):
             The device the model will be sent to. If `None`, will check whether GPU is available.
+        multitarget (`bool`, defaults to `False`):
+            Enable multi-target classification by making `out_features` binary predictions instead
+            of a single multinomial prediction.
     """
 
     def __init__(
         self,
         in_features: Optional[int] = None,
-        out_features: int = 1,
+        out_features: int = 2,
         temperature: float = 1.0,
+        eps: float = 1e-5,
         bias: bool = True,
         dropout: float = 0.1,
         device: Optional[Union[torch.device, str]] = None,
         loss_func: Optional[Union[str, nn.Module]] = None,
-        multitarget: bool = True,
+        multitarget: bool = False,
     ) -> None:
         super(models.Dense, self).__init__()  # init on models.Dense's parent: nn.Module
+
+        if out_features == 1:
+            logger.warning(
+                "Change `out_features` from 1 to 2 since we use `CrossEntropyLoss` for binary classification."
+            )
+            out_features = 2
 
         if in_features is not None:
             self.linear = nn.Linear(in_features, out_features, bias=bias)
@@ -96,6 +161,7 @@ class SetFitHead(models.Dense):
         self.in_features = in_features
         self.out_features = out_features
         self.temperature = temperature
+        self.eps = eps
         self.bias = bias
         self.loss_func = loss_func
         self.multitarget = multitarget
@@ -105,8 +171,10 @@ class SetFitHead(models.Dense):
         self.apply(self._init_weight)
 
     def forward(
-        self, features: Union[Dict[str, torch.Tensor], torch.Tensor], temperature: Optional[float] = None
-    ) -> Union[Dict[str, torch.Tensor], torch.Tensor]:
+        self,
+        features: Union[Dict[str, torch.Tensor], torch.Tensor],
+        temperature: Optional[float] = None,
+    ) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor]]:
         """
         SetFitHead can accept embeddings in:
         1. Output format (`dict`) from Sentence-Transformers.
@@ -118,63 +186,57 @@ class SetFitHead(models.Dense):
                 make sure to store embeddings under the key: 'sentence_embedding'
                 and the outputs will be under the key: 'prediction'.
             temperature (`float`, *optional*):
-                A logits' scaling factor when using multi-targets (i.e., number of targets more than 1).
+                A logits' scaling factor. Higher values makes the model less
+                confident and higher values makes it more confident.
                 Will override the temperature given during initialization.
         Returns:
-        [`Dict[str, torch.Tensor]` or `torch.Tensor`]
+            [`Dict[str, torch.Tensor]` or `Tuple[torch.Tensor]`]
         """
+        temperature = temperature or self.temperature
         is_features_dict = False  # whether `features` is dict or not
         if isinstance(features, dict):
             assert "sentence_embedding" in features
             is_features_dict = True
-
         x = features["sentence_embedding"] if is_features_dict else features
         x = self.dropout(x)
         logits = self.linear(x)
-        temperature = temperature or self.temperature
-        if self.out_features == 1 or self.multitarget:  # only has one target
-            outputs = logits / temperature
-        else:  # multiple targets
-            outputs = nn.functional.softmax(logits / temperature, dim=-1)
+        logits = logits / (temperature + self.eps)
+        if self.multitarget:  # multiple targets per item
+            probs = torch.sigmoid(logits)
+        else:  # one target per item
+            probs = nn.functional.softmax(logits, dim=-1)
 
         if is_features_dict:
-            features.update({"prediction": outputs})
+            features.update(
+                {
+                    "logits": logits,
+                    "probs": probs,
+                }
+            )
             return features
 
-        return outputs
+        return logits, probs
 
     def predict_proba(self, x_test: torch.Tensor) -> torch.Tensor:
         self.eval()
 
-        return self(x_test)
+        return self(x_test)[1]
 
-    def predict(self, x_test: Union[torch.Tensor, "ndarray"]) -> Union[torch.Tensor, "ndarray"]:
-        is_tensor = isinstance(x_test, torch.Tensor)
-        if not is_tensor:  # then assume it's ndarray
-            x_test = torch.Tensor(x_test).to(self.device)
-
+    def predict(self, x_test: torch.Tensor) -> torch.Tensor:
         probs = self.predict_proba(x_test)
 
-        if self.out_features == 1 or self.multitarget:
-            probs = torch.sigmoid(probs)
-            out = torch.where(probs >= 0.5, 1, 0)
-        else:
-            out = torch.argmax(probs, dim=-1)
-
-        if not is_tensor:
-            return out.cpu().numpy()
-
-        return out
+        if self.multitarget:
+            return torch.where(probs >= 0.5, 1, 0)
+        return torch.argmax(probs, dim=-1)
 
     def get_loss_fn(self):
         if isinstance(self.loss_func, nn.Module):
             return self.loss_func
 
         elif self.loss_func is None:
-            if self.out_features == 1 or self.multitarget:
+            if self.multitarget:
                 return torch.nn.BCEWithLogitsLoss()
-            else:
-                return torch.nn.CrossEntropyLoss()
+            return torch.nn.CrossEntropyLoss()
 
         elif self.loss_func == 'Asymm':
             if self.multitarget:
@@ -239,10 +301,15 @@ class SetFitModel(PyTorchModelHubMixin):
 
         self.normalize_embeddings = normalize_embeddings
 
+    @property
+    def has_differentiable_head(self) -> bool:
+        # if False, sklearn is assumed to be used instead
+        return isinstance(self.model_head, nn.Module)
+
     def fit(
         self,
         x_train: List[str],
-        y_train: List[int],
+        y_train: Union[List[int], List[List[int]]],
         num_epochs: int,
         x_val: Optional[List[str]] = None,
         y_val: Optional[List[int]] = None,
@@ -254,7 +321,7 @@ class SetFitModel(PyTorchModelHubMixin):
         max_length: Optional[int] = None,
         show_progress_bar: Optional[bool] = None,
     ) -> None:
-        if isinstance(self.model_head, nn.Module):  # train with pyTorch
+        if self.has_differentiable_head:  # train with pyTorch
             device = self.model_body.device
 
             val_dataloader = None
@@ -287,9 +354,9 @@ class SetFitModel(PyTorchModelHubMixin):
                     if self.normalize_embeddings:
                         outputs = torch.nn.functional.normalize(outputs, p=2, dim=1)
                     outputs = self.model_head(outputs)
-                    predictions = outputs["prediction"]
+                    logits = outputs["logits"]
 
-                    loss = criterion(predictions, labels)
+                    loss = criterion(logits, labels)
                     loss.backward()
                     optimizer.step()
                     total_loss += loss.item()
@@ -332,7 +399,7 @@ class SetFitModel(PyTorchModelHubMixin):
     def _prepare_dataloader(
         self,
         x_train: List[str],
-        y_train: List[int],
+        y_train: Union[List[int], List[List[int]]],
         batch_size: Optional[int] = None,
         max_length: Optional[int] = None,
         shuffle: bool = True,
@@ -360,7 +427,11 @@ class SetFitModel(PyTorchModelHubMixin):
             max_length=max_length,
         )
         dataloader = DataLoader(
-            dataset, batch_size=batch_size, collate_fn=SetFitDataset.collate_fn, shuffle=shuffle, pin_memory=True
+            dataset,
+            batch_size=batch_size,
+            collate_fn=dataset.collate_fn,
+            shuffle=shuffle,
+            pin_memory=True,
         )
 
         return dataloader
@@ -375,8 +446,16 @@ class SetFitModel(PyTorchModelHubMixin):
         l2_weight = l2_weight or self.l2_weight
         optimizer = torch.optim.AdamW(
             [
-                {"params": self.model_body.parameters(), "lr": body_learning_rate, "weight_decay": l2_weight},
-                {"params": self.model_head.parameters(), "lr": learning_rate, "weight_decay": l2_weight},
+                {
+                    "params": self.model_body.parameters(),
+                    "lr": body_learning_rate,
+                    "weight_decay": l2_weight,
+                },
+                {
+                    "params": self.model_head.parameters(),
+                    "lr": learning_rate,
+                    "weight_decay": l2_weight,
+                },
             ],
         )
 
@@ -400,12 +479,11 @@ class SetFitModel(PyTorchModelHubMixin):
 
             outputs = self.model_body(features)
             outputs = self.model_head(features)
-            predictions = outputs["prediction"]
+            predictions = outputs["logits"]
 
             loss = criterion(predictions, labels)
 
-            # binary or multilabel
-            if self.multi_target_strategy or self.model_head.out_features == 1:
+            if self.multi_target_strategy:  # multilabel
                 out = torch.sigmoid(predictions)
                 out = torch.where(out >= 0.5, 1, 0)
             else:
@@ -438,13 +516,37 @@ class SetFitModel(PyTorchModelHubMixin):
         for param in model.parameters():
             param.requires_grad = not to_freeze
 
-    def predict(self, x_test: List[str]) -> Union[torch.Tensor, np.ndarray]:
-        embeddings = self.model_body.encode(x_test, normalize_embeddings=self.normalize_embeddings)
-        return self.model_head.predict(embeddings)
+    def predict(self, x_test: List[str], as_numpy: bool = False) -> Union[torch.Tensor, "ndarray"]:
+        embeddings = self.model_body.encode(
+            x_test,
+            normalize_embeddings=self.normalize_embeddings,
+            convert_to_tensor=self.has_differentiable_head,
+        )
 
-    def predict_proba(self, x_test: List[str]) -> Union[torch.Tensor, np.ndarray]:
-        embeddings = self.model_body.encode(x_test, normalize_embeddings=self.normalize_embeddings)
-        return self.model_head.predict_proba(embeddings)
+        outputs = self.model_head.predict(embeddings)
+
+        if as_numpy and self.has_differentiable_head:
+            outputs = outputs.detach().cpu().numpy()
+        elif not as_numpy and not self.has_differentiable_head:
+            outputs = torch.from_numpy(outputs)
+
+        return outputs
+
+    def predict_proba(self, x_test: List[str], as_numpy: bool = False) -> Union[torch.Tensor, "ndarray"]:
+        embeddings = self.model_body.encode(
+            x_test,
+            normalize_embeddings=self.normalize_embeddings,
+            convert_to_tensor=self.has_differentiable_head,
+        )
+
+        outputs = self.model_head.predict_proba(embeddings)
+
+        if as_numpy and self.has_differentiable_head:
+            outputs = outputs.detach().cpu().numpy()
+        elif not as_numpy and not self.has_differentiable_head:
+            outputs = torch.from_numpy(outputs)
+
+        return outputs
 
     def to(self, device: Union[str, torch.device]) -> "SetFitModel":
         """Move this SetFitModel to `device`, and then return `self`. This method does not copy.
@@ -455,18 +557,36 @@ class SetFitModel(PyTorchModelHubMixin):
         Returns:
             SetFitModel: Returns the original model, but now on the desired device.
         """
+        # Note that we must also set _target_device, or any SentenceTransformer.fit() call will reset
+        # the body location
+        self.model_body._target_device = device if isinstance(device, torch.device) else torch.device(device)
         self.model_body = self.model_body.to(device)
 
-        if isinstance(self.model_head, torch.nn.Module):
+        if self.has_differentiable_head:
             self.model_head = self.model_head.to(device)
 
         return self
+
+    def create_model_card(self, path: str, model_name: Optional[str] = "SetFit Model") -> None:
+        """Creates and saves a model card for a SetFit model.
+
+        Args:
+            path (str): The path to save the model card to.
+            model_name (str, *optional*): The name of the model. Defaults to `SetFit Model`.
+        """
+        if not os.path.exists(path):
+            os.makedirs(path)
+
+        model_card_content = MODEL_CARD_TEMPLATE.format(model_name=model_name)
+        with open(os.path.join(path, "README.md"), "w", encoding="utf-8") as f:
+            f.write(model_card_content)
 
     def __call__(self, inputs):
         return self.predict(inputs)
 
     def _save_pretrained(self, save_directory: str) -> None:
         self.model_body.save(path=save_directory)
+        self.create_model_card(path=save_directory, model_name=save_directory)
         if isinstance(self.model_head, nn.Module):
             torch.save(self.model_head, f"{save_directory}/{MODEL_HEAD_NAME_TORCH}")
         else:
@@ -488,7 +608,7 @@ class SetFitModel(PyTorchModelHubMixin):
         normalize_embeddings: bool = False,
         **model_kwargs,
     ) -> "SetFitModel":
-        model_body = SentenceTransformer(model_id, cache_folder=cache_dir)
+        model_body = SentenceTransformer(model_id, cache_folder=cache_dir, use_auth_token=use_auth_token)
         target_device = model_body._target_device
         model_body.to(target_device)  # put `model_body` on the target device
 
@@ -545,6 +665,7 @@ class SetFitModel(PyTorchModelHubMixin):
             else:
                 model_head = torch.load(model_head_file, map_location=target_device)
         else:
+            head_params = model_kwargs.get("head_params", {})
             if use_differentiable_head:
                 if multi_target_strategy is None:
                     use_multitarget = False
@@ -555,22 +676,17 @@ class SetFitModel(PyTorchModelHubMixin):
                         raise ValueError(
                             f"multi_target_strategy '{multi_target_strategy}' is not supported for differentiable head"
                         )
-                body_embedding_dim = model_body.get_sentence_embedding_dimension()
-                if "head_params" in model_kwargs.keys():
-                    model_kwargs["head_params"].update({"in_features": body_embedding_dim})
-                    model_kwargs["head_params"].update(
-                        {"device": target_device}
-                    )  # follow the `model_body`, put `model_head` on the target device
-                    model_head = SetFitHead(**model_kwargs["head_params"], multitarget=use_multitarget)
-                else:
-                    model_head = SetFitHead(
-                        in_features=body_embedding_dim, device=target_device, multitarget=use_multitarget
-                    )  # follow the `model_body`, put `model_head` on the target device
+                # Base `model_head` parameters
+                # - get the sentence embedding dimension from the `model_body`
+                # - follow the `model_body`, put `model_head` on the target device
+                base_head_params = {
+                    "in_features": model_body.get_sentence_embedding_dimension(),
+                    "device": target_device,
+                    "multitarget": use_multitarget,
+                }
+                model_head = SetFitHead(**{**head_params, **base_head_params})
             else:
-                if "head_params" in model_kwargs.keys():
-                    clf = LogisticRegression(**model_kwargs["head_params"])
-                else:
-                    clf = LogisticRegression()
+                clf = LogisticRegression(**head_params)
                 if multi_target_strategy is not None:
                     if multi_target_strategy == "one-vs-rest":
                         multilabel_classifier = OneVsRestClassifier(clf)
@@ -696,19 +812,21 @@ def sentence_pairs_generation(sentences, labels, pairs):
     # labels to indicate if a pair is positive or negative
 
     num_classes = np.unique(labels)
-    idx = [np.where(labels == i)[0] for i in num_classes]
+    label_to_idx = {x: i for i, x in enumerate(num_classes)}
+    positive_idxs = [np.where(labels == i)[0] for i in num_classes]
+    negative_idxs = [np.where(labels != i)[0] for i in num_classes]
 
     for first_idx in range(len(sentences)):
         current_sentence = sentences[first_idx]
         label = labels[first_idx]
-        second_idx = np.random.choice(idx[np.where(num_classes == label)[0][0]])
+        second_idx = np.random.choice(positive_idxs[label_to_idx[label]])
         positive_sentence = sentences[second_idx]
         # Prepare a positive pair and update the sentences and labels
         # lists, respectively
         pairs.append(InputExample(texts=[current_sentence, positive_sentence], label=1.0))
 
-        negative_idx = np.where(labels != label)[0]
-        negative_sentence = sentences[np.random.choice(negative_idx)]
+        third_idx = np.random.choice(negative_idxs[label_to_idx[label]])
+        negative_sentence = sentences[third_idx]
         # Prepare a negative pair of sentences and update our lists
         pairs.append(InputExample(texts=[current_sentence, negative_sentence], label=0.0))
     # Return a 2-tuple of our sentence pairs and labels
@@ -724,7 +842,6 @@ def sentence_pairs_generation_multilabel(sentences, labels, pairs):
         if len(np.where(labels.dot(labels[first_idx, :].T) == 0)[0]) == 0:
             continue
         else:
-
             for _label in sample_labels:
                 second_idx = np.random.choice(np.where(labels[:, _label] == 1)[0])
                 positive_sentence = sentences[second_idx]

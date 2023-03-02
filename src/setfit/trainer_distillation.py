@@ -134,8 +134,9 @@ class DistillationSetFitTrainer(SetFitTrainer):
             show_progress_bar (`bool`, *optional*, defaults to `True`):
                 Whether to show a bar that indicates training progress.
         """
+        set_seed(self.seed)  # Seed must be set before instantiating the model when using model_init.
+
         if trial:  # Trial and model initialization
-            set_seed(self.seed)  # Seed must be set before instantiating the model when using model_init.
             self._hp_search_setup(trial)  # sets trainer parameters and initializes model
 
         if self.train_dataset is None:
@@ -158,11 +159,8 @@ class DistillationSetFitTrainer(SetFitTrainer):
         num_epochs = num_epochs or self.num_epochs
         batch_size = batch_size or self.batch_size
         learning_rate = learning_rate or self.learning_rate
-        is_differentiable_head = isinstance(
-            self.student_model.model_head, torch.nn.Module
-        )  # If False, assume using sklearn
 
-        if not is_differentiable_head or self._freeze:
+        if not self.student_model.has_differentiable_head or self._freeze:
             # sentence-transformers adaptation
             if self.loss_class in [
                 losses.BatchAllTripletLoss,
@@ -185,14 +183,11 @@ class DistillationSetFitTrainer(SetFitTrainer):
                 elif self.loss_class is SupConLoss:
                     train_loss = self.loss_class(model=self.student_model)
                 else:
-
                     train_loss = self.loss_class(
                         model=self.student_model,
                         distance_metric=BatchHardTripletLossDistanceFunction.cosine_distance,
                         margin=0.25,
                     )
-
-                train_steps = len(train_dataloader) * self.num_epochs
             else:
                 train_examples = []
 
@@ -212,26 +207,25 @@ class DistillationSetFitTrainer(SetFitTrainer):
 
                 train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=batch_size)
                 train_loss = self.loss_class(self.student_model.model_body)
-                train_steps = len(train_dataloader) * num_epochs
 
+            total_train_steps = len(train_dataloader) * num_epochs
             logger.info("***** Running training *****")
             logger.info(f"  Num examples = {len(train_examples)}")
             logger.info(f"  Num epochs = {num_epochs}")
-            logger.info(f"  Total optimization steps = {train_steps}")
+            logger.info(f"  Total optimization steps = {total_train_steps}")
             logger.info(f"  Total train batch size = {batch_size}")
 
-            warmup_steps = math.ceil(train_steps * self.warmup_proportion)
+            warmup_steps = math.ceil(total_train_steps * self.warmup_proportion)
             self.student_model.model_body.fit(
                 train_objectives=[(train_dataloader, train_loss)],
                 epochs=num_epochs,
-                steps_per_epoch=train_steps,
                 optimizer_params={"lr": learning_rate},
                 warmup_steps=warmup_steps,
                 show_progress_bar=show_progress_bar,
                 use_amp=self.use_amp,
             )
 
-        if not is_differentiable_head or not self._freeze:
+        if not self.student_model.has_differentiable_head or not self._freeze:
             # Train the final classifier
             self.student_model.fit(
                 x_train,

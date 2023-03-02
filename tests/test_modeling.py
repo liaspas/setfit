@@ -1,6 +1,7 @@
 from unittest import TestCase
 
 import numpy as np
+import pytest
 import torch
 from datasets import load_dataset
 from sentence_transformers import SentenceTransformer
@@ -10,6 +11,9 @@ from sklearn.multioutput import ClassifierChain, MultiOutputClassifier
 
 from setfit import SetFitHead, SetFitModel
 from setfit.modeling import MODEL_HEAD_NAME, sentence_pairs_generation, sentence_pairs_generation_multilabel
+
+
+torch_cuda_available = pytest.mark.skipif(not torch.cuda.is_available(), reason="PyTorch must be compiled with CUDA")
 
 
 def test_sentence_pairs_generation():
@@ -124,7 +128,7 @@ class SetFitModelDifferentiableHeadTest(TestCase):
 
         outputs = model.model_body(features)
         outputs = model.model_head(outputs)
-        loss = criterion(outputs["prediction"], labels)
+        loss = criterion(outputs["logits"], labels)
         loss.backward()
         optimizer.step()
 
@@ -151,7 +155,7 @@ class SetFitModelDifferentiableHeadTest(TestCase):
         model = self._build_model(num_classes=1)
 
         assert type(model.model_head) is SetFitHead
-        assert model.model_head.out_features == 1
+        assert model.model_head.out_features == 2
 
     def test_setfit_multi_targets_differentiable_head(self):
         assert type(self.model.model_head) is SetFitHead
@@ -212,6 +216,24 @@ def test_setfit_from_pretrained_local_model_with_head(tmp_path):
     assert isinstance(model, SetFitModel)
 
 
+def test_setfithead_multitarget_from_pretrained():
+    model = SetFitModel.from_pretrained(
+        "sentence-transformers/paraphrase-albert-small-v2",
+        use_differentiable_head=True,
+        multi_target_strategy="one-vs-rest",
+        head_params={"out_features": 5},
+    )
+    assert isinstance(model.model_head, SetFitHead)
+    assert model.model_head.multitarget
+    assert isinstance(model.model_head.get_loss_fn(), torch.nn.BCEWithLogitsLoss)
+
+    y_pred = model.predict("Test text")
+    assert len(y_pred) == 5
+
+    y_pred_probs = model.predict_proba("Test text", as_numpy=True)
+    assert not np.isclose(y_pred_probs.sum(), 1)  # Should not sum to one
+
+
 def test_to_logistic_head():
     model = SetFitModel.from_pretrained("sentence-transformers/paraphrase-albert-small-v2")
     devices = (
@@ -237,3 +259,20 @@ def test_to_torch_head():
         model.to(device)
         assert model.model_body.device == device
         assert model.model_head.device == device
+
+
+@torch_cuda_available
+@pytest.mark.parametrize("use_differentiable_head", [True, False])
+def test_to_sentence_transformer_device_reset(use_differentiable_head):
+    # This should initialize SentenceTransformer() without a specific device
+    # which sets the model to CUDA iff CUDA is available.
+    model = SetFitModel.from_pretrained(
+        "sentence-transformers/paraphrase-albert-small-v2", use_differentiable_head=use_differentiable_head
+    )
+    # If we move the entire model to CPU, we expect it to stay on CPU forever,
+    # Even after encoding or fitting
+    model.to("cpu")
+    assert model.model_body.device == torch.device("cpu")
+
+    model.model_body.encode("This is a test sample to encode")
+    assert model.model_body.device == torch.device("cpu")
