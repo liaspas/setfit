@@ -5,6 +5,7 @@ import pandas as pd
 import torch
 from datasets import Dataset, DatasetDict, load_dataset
 from torch.utils.data import Dataset as TorchDataset
+from transformers.tokenization_utils_base import BatchEncoding
 
 from . import logging
 
@@ -251,6 +252,7 @@ class SetFitDataset(TorchDataset):
         y: Union[List[int], List[List[int]]],
         tokenizer: "PreTrainedTokenizerBase",
         max_length: int = 32,
+        chunk_length: Optional[int] = None,
     ) -> None:
         assert len(x) == len(y)
 
@@ -258,11 +260,12 @@ class SetFitDataset(TorchDataset):
         self.y = y
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.chunk_length = chunk_length
 
     def __len__(self) -> int:
         return len(self.x)
 
-    def __getitem__(self, idx: int) -> Tuple[TokenizerOutput, Union[int, List[int]]]:
+    def __getitem__(self, idx: int) -> Tuple[BatchEncoding, Union[int, List[int]]]:
         feature = self.tokenizer(
             self.x[idx],
             max_length=self.max_length,
@@ -271,6 +274,23 @@ class SetFitDataset(TorchDataset):
             return_attention_mask="attention_mask" in self.tokenizer.model_input_names,
             return_token_type_ids="token_type_ids" in self.tokenizer.model_input_names,
         )
+
+        if self.chunk_length:
+            # Split the encoded input into chunks of `chunk_length` tokens
+            num_chunks = len(feature["input_ids"]) // self.chunk_length
+            if len(feature["input_ids"]) % self.chunk_length != 0:
+                num_chunks += 1
+            chunked_features = []
+            for i in range(num_chunks):
+                start = i * self.chunk_length
+                end = (i + 1) * self.chunk_length
+                chunked_features.append({
+                    "input_ids": feature["input_ids"][start:end],
+                    "attention_mask": feature["attention_mask"][start:end],
+                    "token_type_ids": feature["token_type_ids"][start:end],
+                })
+            feature = chunked_features
+
         label = self.y[idx]
 
         return feature, label
@@ -278,17 +298,28 @@ class SetFitDataset(TorchDataset):
     def collate_fn(self, batch):
         features = {input_name: [] for input_name in self.tokenizer.model_input_names}
 
+        lengths = 1
         labels = []
         for feature, label in batch:
-            features["input_ids"].append(feature["input_ids"])
-            if "attention_mask" in features:
-                features["attention_mask"].append(feature["attention_mask"])
-            if "token_type_ids" in features:
-                features["token_type_ids"].append(feature["token_type_ids"])
+            # these are the features from chunked text samples
+            if isinstance(feature, list):
+                lengths = len(feature)  # all chunks will have equal length
+                for chunk in feature:
+                    features["input_ids"].append(chunk["input_ids"])
+                    if "attention_mask" in features:
+                        features["attention_mask"].append(chunk["attention_mask"])
+                    if "token_type_ids" in features:
+                        features["token_type_ids"].append(chunk["token_type_ids"])
+            else:
+                features["input_ids"].append(feature["input_ids"])
+                if "attention_mask" in features:
+                    features["attention_mask"].append(feature["attention_mask"])
+                if "token_type_ids" in features:
+                    features["token_type_ids"].append(feature["token_type_ids"])
             labels.append(label)
 
         # convert to tensors
         features = {k: torch.Tensor(v).int() for k, v in features.items()}
         labels = torch.Tensor(labels)
         labels = labels.long() if len(labels.size()) == 1 else labels.float()
-        return features, labels
+        return features, labels, lengths

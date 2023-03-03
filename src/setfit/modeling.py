@@ -343,7 +343,7 @@ class SetFitModel(PyTorchModelHubMixin):
                 total_loss = 0.0
 
                 for batch in train_dataloader:
-                    features, labels = batch
+                    features, labels, lengths = batch
                     optimizer.zero_grad()
 
                     # to model's device
@@ -351,6 +351,12 @@ class SetFitModel(PyTorchModelHubMixin):
                     labels = labels.to(device)
 
                     outputs = self.model_body(features)
+
+                    # Compute the average of elements in `outputs` based on durations in `lengths`
+                    if lengths > 1:
+                        # we only need "sentence_embedding" as the other keys aren't used
+                        outputs["sentence_embedding"] = torch.nn.functional.avg_pool1d(outputs["sentence_embedding"].T, kernel_size=lengths, stride=lengths).T
+                    
                     if self.normalize_embeddings:
                         outputs = torch.nn.functional.normalize(outputs, p=2, dim=1)
                     outputs = self.model_head(outputs)
@@ -404,6 +410,7 @@ class SetFitModel(PyTorchModelHubMixin):
         max_length: Optional[int] = None,
         shuffle: bool = True,
     ) -> DataLoader:
+        chunk_length = None
         max_acceptable_length = self.model_body.get_max_seq_length()
         if max_length is None:
             max_length = max_acceptable_length
@@ -415,16 +422,17 @@ class SetFitModel(PyTorchModelHubMixin):
             logger.warning(
                 (
                     f"The specified `max_length`: {max_length} is greater than the maximum length of the current model body: {max_acceptable_length}. "
-                    f"Using {max_acceptable_length} instead."
+                    f"Using chunks of {max_acceptable_length} instead."
                 )
             )
-            max_length = max_acceptable_length
+            chunk_length = max_acceptable_length
 
         dataset = SetFitDataset(
             x_train,
             y_train,
             tokenizer=self.model_body.tokenizer,
             max_length=max_length,
+            chunk_length=chunk_length,
         )
         dataloader = DataLoader(
             dataset,
