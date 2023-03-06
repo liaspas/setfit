@@ -59,6 +59,7 @@ def parse_args():
     parser.add_argument("--override_results", default=False, action="store_true")
     parser.add_argument("--keep_body_frozen", default=False, action="store_true")
     parser.add_argument("--add_data_augmentation", default=False)
+    parser.add_argument("--unique_pairs", type=bool, default=False)
 
     args = parser.parse_args()
 
@@ -147,6 +148,7 @@ def main():
                 batch_size=args.batch_size,
                 num_epochs=args.num_epochs,
                 num_iterations=args.num_iterations,
+                unique_pairs=args.unique_pairs,
             )
             if args.classifier == "pytorch":
                 trainer.freeze()
