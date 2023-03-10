@@ -372,7 +372,7 @@ class SetFitModel(PyTorchModelHubMixin):
 
                 # validation step
                 if val_dataloader:
-                    val_loss, val_f1 = self._val_step(val_dataloader, criterion, val_metric)
+                    val_loss, val_f1 = self._val_step(val_dataloader, val_metric)
                     logger.info(
                         f"Epoch {epoch_idx}: train loss: {train_loss:.3f}"
                         f" | val loss {val_loss:.3f}, val f1 {val_f1:.3f}"
@@ -469,8 +469,9 @@ class SetFitModel(PyTorchModelHubMixin):
 
         return optimizer
 
-    def _val_step(self, dataloader: DataLoader, criterion, val_metric: str):
+    def _val_step(self, dataloader: DataLoader, val_metric: str):
         device = self.model_body.device
+        criterion = self.model_head.get_loss_fn()
         total_loss = 0.0
         # for the score
         pred_y_all = []
@@ -479,13 +480,21 @@ class SetFitModel(PyTorchModelHubMixin):
         self.model_body.eval()
         self.model_head.eval()
         for batch in dataloader:
-            features, labels = batch
+            features, labels, lengths = batch
 
             # to model's device
             features = {k: v.to(device) for k, v in features.items()}
             labels = labels.to(device)
 
             outputs = self.model_body(features)
+
+            # Compute the average of elements in `outputs` based on durations in `lengths`
+            if lengths > 1:
+                # we only need "sentence_embedding" as the other keys aren't used
+                outputs["sentence_embedding"] = torch.nn.functional.avg_pool1d(outputs["sentence_embedding"].T, kernel_size=lengths, stride=lengths).T
+            if self.normalize_embeddings:
+                outputs = torch.nn.functional.normalize(outputs, p=2, dim=1)
+
             outputs = self.model_head(features)
             predictions = outputs["logits"]
 
