@@ -164,8 +164,8 @@ class SetFitHead(models.Dense):
         self.eps = eps
         self.bias = bias
         self.loss_func = loss_func
-        self.multitarget = multitarget
         self._device = device or "cuda" if torch.cuda.is_available() else "cpu"
+        self.multitarget = multitarget
 
         self.to(self._device)
         self.apply(self._init_weight)
@@ -602,12 +602,13 @@ class SetFitModel(PyTorchModelHubMixin):
         return self.predict(inputs)
 
     def _save_pretrained(self, save_directory: str) -> None:
-        self.model_body.save(path=save_directory)
+        save_directory = str(save_directory)
+        self.model_body.save(path=save_directory, create_model_card=False)
         self.create_model_card(path=save_directory, model_name=save_directory)
         if isinstance(self.model_head, nn.Module):
-            torch.save(self.model_head, f"{save_directory}/{MODEL_HEAD_NAME_TORCH}")
+            torch.save(self.model_head, str(Path(save_directory) / MODEL_HEAD_NAME_TORCH))
         else:
-            joblib.dump(self.model_head, f"{save_directory}/{MODEL_HEAD_NAME_SK}")
+            joblib.dump(self.model_head, str(Path(save_directory) / MODEL_HEAD_NAME_SK))
 
     @classmethod
     def _from_pretrained(
