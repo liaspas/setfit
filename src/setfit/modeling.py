@@ -5,6 +5,7 @@ import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Union
+from setfit.losses import ASLSingleLabel, AsymmetricLossOptimized
 
 
 # For Python 3.7 compatibility
@@ -78,7 +79,9 @@ class SetFitHead(models.Dense):
         temperature: float = 1.0,
         eps: float = 1e-5,
         bias: bool = True,
+        dropout: float = 0.0,
         device: Optional[Union[torch.device, str]] = None,
+        loss_func: Optional[Union[str, nn.Module]] = None,
         multitarget: bool = False,
     ) -> None:
         super(models.Dense, self).__init__()  # init on models.Dense's parent: nn.Module
@@ -94,11 +97,13 @@ class SetFitHead(models.Dense):
         else:
             self.linear = nn.LazyLinear(out_features, bias=bias)
 
+        self.dropout = nn.Dropout(dropout)
         self.in_features = in_features
         self.out_features = out_features
         self.temperature = temperature
         self.eps = eps
         self.bias = bias
+        self.loss_func = loss_func
         self._device = device or "cuda" if torch.cuda.is_available() else "cpu"
         self.multitarget = multitarget
 
@@ -133,6 +138,7 @@ class SetFitHead(models.Dense):
             assert "sentence_embedding" in features
             is_features_dict = True
         x = features["sentence_embedding"] if is_features_dict else features
+        x = self.dropout(x)
         logits = self.linear(x)
         logits = logits / (temperature + self.eps)
         if self.multitarget:  # multiple targets per item
@@ -162,10 +168,27 @@ class SetFitHead(models.Dense):
             return torch.where(probs >= 0.5, 1, 0)
         return torch.argmax(probs, dim=-1)
 
-    def get_loss_fn(self) -> nn.Module:
-        if self.multitarget:  # if sigmoid output
-            return torch.nn.BCEWithLogitsLoss()
-        return torch.nn.CrossEntropyLoss()
+    def get_loss_fn(self):
+        if isinstance(self.loss_func, nn.Module):
+            return self.loss_func
+
+        elif self.loss_func is None:
+            if self.multitarget:
+                return torch.nn.BCEWithLogitsLoss()
+            return torch.nn.CrossEntropyLoss()
+
+        elif self.loss_func == 'Asymm':
+            if self.multitarget:
+                return AsymmetricLossOptimized()
+            else:
+                return ASLSingleLabel()
+
+        else:
+            raise NotImplementedError(
+                f"Loss {self.loss_func} is not implemented."
+                "Supported: BCEWithLogitsLoss and CrossEntropy (default)"
+                "'Asymm' for Asymmetric Loss, else pass the loss function as a torch module."
+            )
 
     @property
     def device(self) -> torch.device:
