@@ -6,47 +6,7 @@ import re
 MODEL_CARD_PATTERN = re.compile(
     """\
 ---
-language:
-- en
-license: apache-2\.0
-library_name: setfit
-tags:
-- setfit
-- sentence-transformers
-- text-classification
-- generated_from_setfit_trainer
-datasets:
-- sst2
-metrics:
-- accuracy
-widget:
-- text: .*
-pipeline_tag: text-classification
-inference: true
-co2_eq_emissions:
-  emissions: [\d\.\-e]+
-  source: codecarbon
-  training_type: fine-tuning
-  on_cloud: (false|true)
-  cpu_model: .+
-  ram_total_size: [\d\.]+
-  hours_used: [\d\.]+
-(  hardware_used: .+
-)?base_model: sentence-transformers/paraphrase-albert-small-v2
-model-index:
-- name: SetFit with sentence-transformers\/paraphrase-albert-small-v2 on SST2
-  results:
-  - task:
-      type: text-classification
-      name: Text Classification
-    dataset:
-      name: SST2
-      type: sst2
-      split: test
-    metrics:
-    - type: accuracy
-      value: [\d\.]+
-      name: Accuracy
+.*
 ---
 
 \# SetFit with sentence\-transformers/paraphrase\-albert\-small\-v2 on SST2
@@ -62,8 +22,8 @@ The model has been trained using an efficient few\-shot learning technique that 
 
 ### Model Description
 - \*\*Model Type:\*\* SetFit
-- \*\*Sentence Transformer body:\*\* \[sentence-transformers/paraphrase-albert-small-v2\]\(https://huggingface.co/sentence-transformers/paraphrase-albert-small-v2\)
-- \*\*Classification head:\*\* a \[LogisticRegression\]\(https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegression.html\) instance
+- \*\*Sentence Transformer body:\*\* \[sentence-transformers/paraphrase-albert-small-v2\]\(https://huggingface.co/sentence-transformers/paraphrase-albert-small-v2\) *
+- \*\*Classification head:\*\* a \[LogisticRegression\]\(https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegression.html\) instance *
 - \*\*Maximum Sequence Length:\*\* 100 tokens
 - \*\*Number of Classes:\*\* 2 classes
 - \*\*Training Dataset:\*\* \[SST2\]\(https://huggingface.co/datasets/sst2\)
@@ -79,8 +39,8 @@ The model has been trained using an efficient few\-shot learning technique that 
 ### Model Labels
 \| Label\s+\| Examples\s+\|
 \|:-+\|:-+\|
-\| negative\s+\| [^\|]+ \|
 \| positive\s+\| [^\|]+ \|
+\| negative\s+\| [^\|]+ \|
 
 ## Evaluation
 
@@ -137,9 +97,9 @@ preds = model\(".+"\)
 ## Training Details
 
 ### Training Set Metrics
-\| Training set \| Min \| Median  \| Max \|
-\|:-------------\|:----\|:--------\|:----\|
-\| Word count   \| 2   \| 11.4375 \| 33  \|
+\| Training set \| Min \| Median \| Max \|
+\|:-------------\|:----\|:-------\|:----\|
+\| Word count   \| 3   \| 7.875  \| 18  \|
 
 \| Label    \| Training Sample Count \|
 \|:---------\|:----------------------\|
@@ -159,13 +119,14 @@ preds = model\(".+"\)
 - end_to_end: False
 - use_amp: False
 - warmup_proportion: 0.1
+- l2_weight: 0.01
 - seed: 42
 - eval_max_steps: -1
 - load_best_model_at_end: False
 
 ### Training Results
-\| Epoch  \| Step \| Training Loss \| Validation Loss \|
-\|:------:\|:----:\|:-------------:\|:---------------:\|
+\| Epoch \| Step \| Training Loss \| Validation Loss \|
+\|:-----:\|:----:\|:-------------:\|:---------------:\|
 (\| [\d\.]+ +\| [\d\.]+ +\| [\d\.]+ +\| [\d\.]+ +\|\n)+
 ### Environmental Impact
 Carbon emissions were measured using \[CodeCarbon\]\(https://github.com/mlco2/codecarbon\)\.

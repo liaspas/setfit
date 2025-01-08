@@ -11,20 +11,23 @@ MAINTAINER_EMAIL = "lewis@huggingface.co"
 
 INTEGRATIONS_REQUIRE = ["optuna"]
 REQUIRED_PKGS = [
-    "datasets>=2.3.0",
-    "sentence-transformers>=2.2.1",
+    "datasets>=2.15.0",
+    "sentence-transformers[train]>=3",
+    "transformers>=4.41.0",
     "evaluate>=0.3.0",
-    "huggingface_hub>=0.13.0",
+    "huggingface_hub>=0.23.0",
     "scikit-learn",
     "packaging",
 ]
-ABSA_REQUIRE = ["spacy"]
+ABSA_REQUIRE = ["spacy<3.7.6"]
 QUALITY_REQUIRE = ["black", "flake8", "isort", "tabulate"]
-ONNX_REQUIRE = ["onnxruntime", "onnx", "skl2onnx"]
-OPENVINO_REQUIRE = ["hummingbird-ml<0.4.9", "openvino==2022.3.0"]
+ONNX_REQUIRE = ["onnxruntime", "onnx!=1.16.2", "skl2onnx"]
+OPENVINO_REQUIRE = ["hummingbird-ml", "openvino"]
 TESTS_REQUIRE = ["pytest", "pytest-cov"] + ONNX_REQUIRE + OPENVINO_REQUIRE + ABSA_REQUIRE
 DOCS_REQUIRE = ["hf-doc-builder>=0.3.0"]
-CODECARBON_REQUIRE = ["codecarbon"]
+CODECARBON_REQUIRE = ["codecarbon<2.6.0"]
+# 2.7.* fails with AttributeError: 'EmissionsTracker' object has no attribute '_cloud'
+# 2.6.* has an accidental print statement spamming the terminal
 EXTRAS_REQUIRE = {
     "optuna": INTEGRATIONS_REQUIRE,
     "quality": QUALITY_REQUIRE,
@@ -54,7 +57,7 @@ EXTRAS_REQUIRE["compat_tests"] = (
 
 setup(
     name="setfit",
-    version="1.1.0.dev0",
+    version="1.1.0",
     description="Efficient few-shot learning with Sentence Transformers",
     long_description=README_TEXT,
     long_description_content_type="text/markdown",
@@ -69,7 +72,7 @@ setup(
     install_requires=REQUIRED_PKGS,
     extras_require=EXTRAS_REQUIRE,
     classifiers=[
-        "Development Status :: 1 - Planning",
+        "Development Status :: 5 - Production/Stable",
         "Intended Audience :: Developers",
         "Intended Audience :: Education",
         "Intended Audience :: Science/Research",
@@ -78,6 +81,9 @@ setup(
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
     keywords="nlp, machine learning, fewshot learning, transformers",
